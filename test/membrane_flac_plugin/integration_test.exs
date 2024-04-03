@@ -23,7 +23,7 @@ end
 defmodule Membrane.FLAC.Parser.IntegrationTest do
   use ExUnit.Case
   import Membrane.Testing.Assertions
-  alias Membrane.Pipeline
+  alias Membrane.{Pipeline, Time}
 
   defp prepare_files(filename) do
     in_path = "../fixtures/#{filename}.flac" |> Path.expand(__DIR__)
@@ -104,7 +104,7 @@ defmodule Membrane.FLAC.Parser.IntegrationTest do
 
     Enum.each(0..27, fn index ->
       assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
-      assert out_pts == index * 72_000_000
+      assert out_pts == (index * 72_000_000) |> Time.nanoseconds()
     end)
 
     assert_end_of_stream(pipeline, :sink)
@@ -114,13 +114,12 @@ defmodule Membrane.FLAC.Parser.IntegrationTest do
   defp prepare_pts_test_pipeline(generate_best_effort_timestamps?) do
     import Membrane.ChildrenSpec
 
-    spec = [
+    spec =
       child(:source, %Membrane.Testing.Source{output: buffers_from_file()})
       |> child(:parser, %Membrane.FLAC.Parser{
         generate_best_effort_timestamps?: generate_best_effort_timestamps?
       })
       |> child(:sink, Membrane.Testing.Sink)
-    ]
 
     Membrane.Testing.Pipeline.start_link_supervised!(spec: spec)
   end
