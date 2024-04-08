@@ -89,7 +89,6 @@ defmodule Membrane.FLAC.Parser do
       end
 
     actions = [
-      # set pts here
       buffer: {:output, maybe_generate_buffer_pts(buffer, state)},
       end_of_stream: :output,
       notify_parent: {:end_of_stream, :input}

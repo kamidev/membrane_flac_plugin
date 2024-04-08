@@ -100,7 +100,7 @@ defmodule Membrane.FLAC.Parser.IntegrationTest do
 
     # first few buffers are ignored because they contain file metadata, not actual audio
     Enum.each(0..3, fn _x ->
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
+      assert_sink_buffer(pipeline, :sink, _)
     end)
 
     Enum.each(0..27, fn index ->
