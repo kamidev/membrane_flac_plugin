@@ -98,17 +98,14 @@ defmodule Membrane.FLAC.Parser.IntegrationTest do
     pipeline = prepare_pts_test_pipeline(true)
     assert_start_of_stream(pipeline, :sink)
 
-    # first few buffers are ignored because they contain some metadata, not actual audio
+    # first few buffers are ignored because they contain file metadata, not actual audio
     Enum.each(0..3, fn _x ->
       assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
-      IO.inspect(out_pts, label: "out pts")
     end)
 
-    Enum.each(0..26, fn index ->
-    # Enum.each(0..27, fn index -> uncomment this after fixing end_of_stream
+    Enum.each(0..27, fn index ->
       assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
       assert out_pts == (index * 72_000_000) |> Time.nanoseconds()
-      IO.inspect(out_pts, label: "out pts")
     end)
 
     assert_end_of_stream(pipeline, :sink)

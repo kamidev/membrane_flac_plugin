@@ -65,64 +65,12 @@ defmodule Membrane.FLAC.Parser do
               {:stream_format, {:output, format}}
 
             %Buffer{} = buf ->
-              case maybe_set_buffer_pts(buf, state) do
-                {:ok, buffer} ->
-                  {:buffer, {:output, buffer}}
-                {:meta_buffer, buffer} ->
-                  {:meta_buffer, {:output, buffer}}
-              end
+              {:buffer, {:output, maybe_generate_buffer_pts(buf, state)}}
           end)
-        # now we have actions list with maybe streamformat, maybe some audio and maybe some meta
-        # if streamformat is found anywhere it has to be always at the start of actions list
-        {actions_filtered, state} = cond do
 
-          # if there is only meta, we push all meta buffers to state.meta_queue and return empty actions
-          (List.keymember?(actions, :stream_format, 0) or List.keymember?(actions, :meta_buffer, 0)) and not List.keymember?(actions, :buffer, 0) ->
-            state = Map.update!(state, :meta_queue, fn meta_queue ->
-              meta_queue ++ actions
-            end)
-            {[], state}
+        {actions, state} = wait_for_valid_pts(actions, state)
 
-          # if there is meta & audio, we insert at the start any remaining meta from state.meta_queue
-          # and set pts of all meta to pts of first audio next to meta and return all
-          (List.keymember?(actions, :meta_buffer, 0) or List.keymember?(actions, :meta_buffer, 0)) and List.keymember?(actions, :buffer, 0) ->
-            meta_buffers_count = Enum.count(actions, fn action ->
-              {key, _rest} = action
-              key != :buffer
-            end)
-            {only_meta, only_audio} = Enum.split(actions, meta_buffers_count)
-            {:buffer, {:output, audio_buffer}} = List.first(only_audio)
-            meta_buffers_with_pts =
-              state.meta_queue ++ only_meta |> Enum.map(fn
-                {:stream_format, {:output, %FLAC{}}} = format -> format
-                {:meta_buffer, {:output, %Buffer{} = buffer}} ->
-                  {:buffer, {:output, %Buffer{buffer | pts: audio_buffer.pts}}}
-            end)
-            {meta_buffers_with_pts ++ only_audio, %{state | meta_queue: []}}
-
-          # if there is only audio we insert at the start any remaining meta from state.meta_queue,
-          # and set pts of all meta to pts of first audio next to meta and return all
-          not (List.keymember?(actions, :meta_buffer, 0) or List.keymember?(actions, :meta_buffer, 0)) and List.keymember?(actions, :buffer, 0) ->
-            if state.meta_queue == [] do
-              {actions, state}
-            else
-              {:buffer, {:output, audio_buffer}} = List.first(actions)
-              meta_buffers_with_pts =
-                state.meta_queue |> Enum.map(fn
-                  {:stream_format, {:output, %FLAC{}}} = format -> format
-                  {:meta_buffer, {:output, %Buffer{} = buffer}} ->
-                    {:buffer, {:output, %Buffer{buffer | pts: audio_buffer.pts}}}
-              end)
-              {meta_buffers_with_pts ++ actions, %{state | meta_queue: []}}
-            end
-
-          # actions are empty (maybe, idk), nothing was parsed
-          true ->
-            {actions, state}
-        end
-        IO.inspect(actions_filtered, label: "actions_filtered")
-
-        {actions_filtered, %{state | parser: parser}}
+        {actions, %{state | parser: parser}}
 
       {:error, reason} ->
         raise "Parsing error: #{inspect(reason)}"
@@ -133,30 +81,84 @@ defmodule Membrane.FLAC.Parser do
   def handle_end_of_stream(:input, _ctx, state) do
     {:ok, buffer} = Engine.flush(state.parser)
 
+    queued_meta_buffers =
+      if state.generate_best_effort_timestamps? do
+        set_buffers_pts(state.meta_queue, 0)
+      else
+        state.meta_queue
+      end
+
     actions = [
-      buffer: {:output, buffer}, # fix this
+      # set pts here
+      buffer: {:output, maybe_generate_buffer_pts(buffer, state)},
       end_of_stream: :output,
       notify_parent: {:end_of_stream, :input}
     ]
 
-    {actions, state}
+    {queued_meta_buffers ++ actions, state}
   end
-  # maybe_set_buffer_pts() does not take into account changing sample rate during stream, because parser engine doesn't support it.
-  # If you add support for it in parser engine, this function also need to be updated.
-  defp maybe_set_buffer_pts(buffer, state) do
-    if state.generate_best_effort_timestamps? do
-        case buffer.metadata do
-          %{sample_rate: sample_rate, starting_sample_number: starting_sample_number} ->
-            pts = Ratio.new(starting_sample_number, sample_rate) |> Time.seconds()
-            {:ok, %Buffer{buffer | pts: pts}}
 
-          _no_audio_metadata ->
-            {:meta_buffer, buffer}
-        end
+  defp wait_for_valid_pts(actions, state) do
+    {meta_buffers, audio_buffers} =
+      actions
+      |> Enum.split_with(fn
+        {:stream_format, {:output, %FLAC{}}} ->
+          true
 
-    else
-      {:ok, {%Buffer{buffer | pts: state.input_pts}, state}}
+        {:buffer, {:output, %Buffer{} = buffer}} ->
+          case buffer.metadata do
+            %Membrane.FLAC.FrameMetadata{} ->
+              false
+
+            _no_metadata ->
+              true
+          end
+      end)
+
+    meta_queue = state.meta_queue ++ meta_buffers
+
+    cond do
+      audio_buffers != [] and meta_queue != [] ->
+        {:buffer, {:output, %Membrane.Buffer{pts: first_valid_pts}}} = List.first(audio_buffers)
+
+        meta_queue_with_pts = set_buffers_pts(meta_queue, first_valid_pts)
+
+        {meta_queue_with_pts ++ audio_buffers, %{state | meta_queue: []}}
+
+      audio_buffers == [] and meta_queue != [] ->
+        {[], %{state | meta_queue: meta_queue}}
+
+      true ->
+        {audio_buffers, state}
     end
   end
 
+  # maybe_generate_buffer_pts() does not take into account changing sample rate during stream, because parser engine doesn't support it.
+  # If you add support for it in parser engine, this function also need to be updated.
+  defp maybe_generate_buffer_pts(buffer, state) do
+    if state.generate_best_effort_timestamps? do
+      case buffer.metadata do
+        %{sample_rate: sample_rate, starting_sample_number: starting_sample_number} ->
+          pts = Ratio.new(starting_sample_number, sample_rate) |> Time.seconds()
+          %Buffer{buffer | pts: pts}
+
+        _no_audio_metadata ->
+          buffer
+      end
+    else
+      %Buffer{buffer | pts: state.input_pts}
+    end
+  end
+
+  defp set_buffers_pts(meta_buffers, pts) do
+    Enum.map(meta_buffers, fn action ->
+      case action do
+        {:stream_format, {:output, %FLAC{}}} ->
+          action
+
+        {:buffer, {:output, %Buffer{} = buffer}} ->
+          {:buffer, {:output, %Buffer{buffer | pts: pts}}}
+      end
+    end)
+  end
 end
