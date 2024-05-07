@@ -96,7 +96,8 @@ defmodule Membrane.FLAC.Parser do
 
         {actions, state} = calculate_pts(actions, state)
         if length(actions) == 0 do
-          IO.puts("- - ZERO - -")
+          IO.inspect(state.parser.queue, label: "state.parser.queue")
+          # IO.puts("- - ZERO - -")
         end
         {actions, %{state | parser: parser}}
 

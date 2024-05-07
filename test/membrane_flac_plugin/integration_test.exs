@@ -86,7 +86,6 @@ defmodule Membrane.FLAC.Parser.IntegrationTest do
     pipeline = prepare_pts_test_pipeline(false, true)
     assert_start_of_stream(pipeline, :sink)
 
-
     Enum.each(0..31, fn _x ->
       assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
       # assert out_pts == 0 |> Time.nanoseconds()
