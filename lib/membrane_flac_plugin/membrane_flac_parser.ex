@@ -5,11 +5,9 @@ defmodule Membrane.FLAC.Parser do
   Wraps `Membrane.FLAC.Parser.Engine`, see its docs for more info.
   """
   use Membrane.Filter
-
+  require Membrane.Logger
   alias Membrane.{Buffer, FLAC, Time}
   alias Membrane.FLAC.Parser.Engine
-
-  require Membrane.Logger
 
   def_output_pad :output, accepted_format: FLAC
 
@@ -38,7 +36,13 @@ defmodule Membrane.FLAC.Parser do
     {[],
      opts
      |> Map.from_struct()
-     |> Map.merge(%{parser: nil, input_pts: nil, current_pts: nil, meta_queue: []})}
+     |> Map.merge(%{
+       parser: nil,
+       input_pts: nil,
+       current_pts: nil,
+       meta_queue: [],
+       frame_duration: nil
+     })}
   end
 
   @impl true
@@ -52,15 +56,21 @@ defmodule Membrane.FLAC.Parser do
     {[], state}
   end
 
-  defp set_current_pts( %{generate_best_effort_timestamps?: true} = state, _input_pts ) do
+  defp set_current_pts(%{generate_best_effort_timestamps?: true} = state, _input_pts) do
     state
   end
 
-  defp set_current_pts(%{generate_best_effort_timestamps?: false, meta_queue: [ _ | _ ]} = state, input_pts) do
+  defp set_current_pts(
+         %{generate_best_effort_timestamps?: false, meta_queue: [_ | _]} = state,
+         input_pts
+       ) do
     %{state | current_pts: input_pts}
   end
 
-  defp set_current_pts(%{generate_best_effort_timestamps?: false, parser: %{queue: <<>>}} = state, input_pts) do
+  defp set_current_pts(
+         %{generate_best_effort_timestamps?: false, parser: %{queue: <<>>}} = state,
+         input_pts
+       ) do
     %{state | current_pts: input_pts}
   end
 
@@ -74,13 +84,8 @@ defmodule Membrane.FLAC.Parser do
       ) do
     state = set_current_pts(state, input_pts)
     state = %{state | input_pts: input_pts}
-        IO.inspect(input_pts)
-    if not state.generate_best_effort_timestamps?
-    and state.parser.queue != <<>>
-    and state.meta_queue == []
-    and state.current_pts != nil do
-      validate_pts_integrity(state)
-    end
+
+    validate_pts_integrity(state)
 
     case Engine.parse(payload, parser) do
       {:ok, results, parser} ->
@@ -95,10 +100,7 @@ defmodule Membrane.FLAC.Parser do
           end)
 
         {actions, state} = calculate_pts(actions, state)
-        if length(actions) == 0 do
-          IO.inspect(state.parser.queue, label: "state.parser.queue")
-          # IO.puts("- - ZERO - -")
-        end
+
         {actions, %{state | parser: parser}}
 
       {:error, reason} ->
@@ -106,24 +108,27 @@ defmodule Membrane.FLAC.Parser do
     end
   end
 
-  def validate_pts_integrity(state) do
-    # IO.inspect("state.input_pts #{state.input_pts} state.current_pts #{state.current_pts}")
-    cond do
-      state.input_pts == state.current_pts ->
-        # IO.inspect("COOL")
-        :ok
+  defp validate_pts_integrity(state)
+       when not state.generate_best_effort_timestamps? and
+              state.parser.queue != <<>> and
+              state.meta_queue == [] and
+              state.current_pts != nil and
+              state.input_pts != nil and
+              state.frame_duration != nil do
+    epsilon = state.frame_duration / 10
 
-      state.input_pts < state.current_pts ->
-        # IO.inspect("PTS values are overlapping state.input_pts #{state.input_pts} state.current_pts #{state.current_pts}")
-        Membrane.Logger.warning("PTS values are overlapping")
-        :ok
-
-      state.input_pts > state.current_pts ->
-        IO.inspect("PTS values are not continous state.input_pts #{state.input_pts} state.current_pts #{state.current_pts}")
-        Membrane.Logger.warning("PTS values are not continous")
-        :ok
+    if state.input_pts < state.current_pts - epsilon do
+      Membrane.Logger.warning("PTS values are overlapping")
     end
+
+    if state.input_pts > state.current_pts + epsilon do
+      Membrane.Logger.warning("PTS values are not continous")
+    end
+
+    :ok
   end
+
+  defp validate_pts_integrity(_state), do: :ok
 
   @impl true
   def handle_end_of_stream(:input, _ctx, state) do
@@ -142,7 +147,7 @@ defmodule Membrane.FLAC.Parser do
   end
 
   defp calculate_pts(actions, state) do
-    # in some tests actions are not a list but a single action tuple
+    # in some cases actions are not a list but a single action tuple
     actions =
       if is_list(actions) do
         actions
@@ -176,7 +181,6 @@ defmodule Membrane.FLAC.Parser do
     cond do
       audio_buffers != [] and meta_queue != [] ->
         {:buffer, {:output, %Membrane.Buffer{pts: first_valid_pts}}} = List.first(audio_buffers)
-        # IO.inspect(audio_buffers, label: "audio_buffers")
         meta_queue_with_pts = set_pts_meta_buffers(meta_queue, first_valid_pts)
 
         {meta_queue_with_pts ++ audio_buffers, %{state | meta_queue: []}}
@@ -202,18 +206,31 @@ defmodule Membrane.FLAC.Parser do
      end), state}
   end
 
-  defp set_pts_audio_buffers(actions, state) when state.generate_best_effort_timestamps? == false and state.current_pts != nil do
-    %{current_pts: current_pts, buffers: buffers} =
-      Enum.reduce(actions, %{current_pts: state.current_pts, buffers: []}, fn {:buffer,{:output, buffer}}, acc ->
-        %{current_pts: current_pts, buffers: buffers} = acc
-        %{sample_rate: sample_rate, samples: samples} = buffer.metadata
-        duration = Ratio.new(samples, sample_rate) |> Time.seconds()
-        %{ current_pts: current_pts + duration, buffers: buffers ++ [{:buffer, {:output, %Buffer{buffer | pts: current_pts }}}] }
-      end)
-    {buffers, %{state | current_pts: current_pts}}
+  defp set_pts_audio_buffers(actions, state)
+       when state.generate_best_effort_timestamps? == false and state.current_pts != nil do
+    %{current_pts: current_pts, buffers: buffers, frame_duration: frame_duration} =
+      Enum.reduce(
+        actions,
+        %{current_pts: state.current_pts, buffers: [], frame_duration: nil},
+        fn {:buffer, {:output, buffer}}, acc ->
+          %{current_pts: current_pts, buffers: buffers} = acc
+          %{sample_rate: sample_rate, samples: samples} = buffer.metadata
+          duration = Ratio.new(samples, sample_rate) |> Time.seconds()
+
+          %{
+            current_pts: current_pts + duration,
+            buffers: buffers ++ [{:buffer, {:output, %Buffer{buffer | pts: current_pts}}}],
+            frame_duration: duration
+          }
+        end
+      )
+
+    {buffers, %{state | current_pts: current_pts, frame_duration: frame_duration}}
   end
 
-  defp set_pts_audio_buffers(actions, state) when state.generate_best_effort_timestamps? == false and state.current_pts == nil, do: {actions, state}
+  defp set_pts_audio_buffers(actions, state)
+       when state.generate_best_effort_timestamps? == false and state.current_pts == nil,
+       do: {actions, state}
 
   defp set_pts_meta_buffers(meta_buffers, pts) do
     Enum.map(meta_buffers, fn action ->

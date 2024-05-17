@@ -25,6 +25,44 @@ defmodule Membrane.FLAC.Parser.IntegrationTest do
   import Membrane.Testing.Assertions
   alias Membrane.{Pipeline, Time}
 
+  @input_pts [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    72_000_000,
+    144_000_000,
+    216_000_000,
+    288_000_000,
+    360_000_000,
+    432_000_000,
+    504_000_000,
+    576_000_000,
+    576_000_000,
+    648_000_000,
+    720_000_000,
+    792_000_000,
+    864_000_000,
+    936_000_000,
+    1_008_000_000,
+    1_080_000_000,
+    1_152_000_000,
+    1_224_000_000,
+    1_296_000_000,
+    1_296_000_000,
+    1_368_000_000,
+    1_440_000_000,
+    1_512_000_000,
+    1_584_000_000,
+    1_656_000_000,
+    1_728_000_000,
+    1_800_000_000,
+    1_872_000_000,
+    1_944_000_000
+  ]
+
   defp prepare_files(filename) do
     in_path = "../fixtures/#{filename}.flac" |> Path.expand(__DIR__)
     out_path = "/tmp/parsed-#{filename}.flac"
@@ -82,50 +120,14 @@ defmodule Membrane.FLAC.Parser.IntegrationTest do
     assert_parsing_failure("noise_and_junk", false)
   end
 
-  test "generate_best_effort_timestamps false" do
-    pipeline = prepare_pts_test_pipeline(false, true)
-    assert_start_of_stream(pipeline, :sink)
-
-    Enum.each(0..31, fn _x ->
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
-      # assert out_pts == 0 |> Time.nanoseconds()
-      # IO.inspect(out_pts)
-    end)
-
-    # Enum.each(0..3, fn _x ->
-    #   assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
-    #   # assert out_pts == 0 |> Time.nanoseconds()
-    #   # IO.inspect(out_pts, label: "TEST out pts")
-    # end)
-    # # IO.puts("----")
-    # # below we test pts of actual audio buffers
-    # Enum.each(0..27, fn index ->
-    #   assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
-    #   # assert out_pts == (index * 72_000_000) |> Time.nanoseconds()
-    #   # IO.inspect(out_pts, label: "TEST out pts")
-    # end)
-
-    assert_end_of_stream(pipeline, :sink)
-    Pipeline.terminate(pipeline)
-  end
-
   test "generate_best_effort_timestamps true" do
     pipeline = prepare_pts_test_pipeline(true, false)
-    assert_start_of_stream(pipeline, :sink)
+    check_pts_values(pipeline)
+  end
 
-    # first few buffers contain only FLAC file metadata and are expected to have the same pts as the first buffer containing audio, in this case 0
-    Enum.each(0..3, fn _x ->
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
-      assert out_pts == 0 |> Time.nanoseconds()
-    end)
-    # below we test pts of actual audio buffers
-    Enum.each(0..27, fn index ->
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
-      assert out_pts == (index * 72_000_000) |> Time.nanoseconds()
-    end)
-
-    assert_end_of_stream(pipeline, :sink)
-    Pipeline.terminate(pipeline)
+  test "generate_best_effort_timestamps false, with input pts" do
+    pipeline = prepare_pts_test_pipeline(false, true)
+    check_pts_values(pipeline)
   end
 
   test "generate_best_effort_timestamps false, no input pts" do
@@ -135,6 +137,25 @@ defmodule Membrane.FLAC.Parser.IntegrationTest do
     Enum.each(0..31, fn _index ->
       assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
       assert out_pts == nil
+    end)
+
+    assert_end_of_stream(pipeline, :sink)
+    Pipeline.terminate(pipeline)
+  end
+
+  defp check_pts_values(pipeline) do
+    assert_start_of_stream(pipeline, :sink)
+
+    # first few buffers contain only FLAC file metadata and are expected to have the same pts as the first buffer containing audio
+    Enum.each(0..3, fn _x ->
+      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
+      assert out_pts == 0 |> Time.nanoseconds()
+    end)
+
+    # below we test pts of actual audio buffers
+    Enum.each(0..27, fn index ->
+      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: out_pts})
+      assert out_pts == (index * 72_000_000) |> Time.nanoseconds()
     end)
 
     assert_end_of_stream(pipeline, :sink)
@@ -164,13 +185,12 @@ defmodule Membrane.FLAC.Parser.IntegrationTest do
         payload: payload,
         pts:
           if with_pts? do
-            index * 72000000 |> Time.nanoseconds()
+            Enum.at(@input_pts, index)
           else
             nil
           end
       }
     end)
-    # |> IO.inspect()
   end
 
   @spec split_binary(binary(), list(binary())) :: list(binary())
