@@ -33,16 +33,18 @@ defmodule Membrane.FLAC.Parser do
 
   @impl true
   def handle_init(_ctx, opts) do
-    {[],
-     opts
-     |> Map.from_struct()
-     |> Map.merge(%{
-       parser: nil,
-       input_pts: nil,
-       current_pts: nil,
-       meta_queue: [],
-       frame_duration: nil
-     })}
+    state =
+      opts
+      |> Map.from_struct()
+      |> Map.merge(%{
+        parser: nil,
+        input_pts: nil,
+        current_pts: nil,
+        meta_queue: [],
+        frame_duration: nil
+      })
+
+    {[], state}
   end
 
   @impl true
@@ -56,25 +58,29 @@ defmodule Membrane.FLAC.Parser do
     {[], state}
   end
 
-  defp set_current_pts(%{generate_best_effort_timestamps?: true} = state, _input_pts) do
+  defp maybe_set_current_pts_to_input_pts(
+         %{generate_best_effort_timestamps?: true} = state,
+         _input_pts
+       ) do
     state
   end
 
-  defp set_current_pts(
-         %{generate_best_effort_timestamps?: false, meta_queue: [_ | _]} = state,
+  defp maybe_set_current_pts_to_input_pts(
+         %{generate_best_effort_timestamps?: false} = state,
          input_pts
-       ) do
+       )
+       when state.meta_queue != [] do
     %{state | current_pts: input_pts}
   end
 
-  defp set_current_pts(
+  defp maybe_set_current_pts_to_input_pts(
          %{generate_best_effort_timestamps?: false, parser: %{queue: <<>>}} = state,
          input_pts
        ) do
     %{state | current_pts: input_pts}
   end
 
-  defp set_current_pts(state, _input_pts), do: state
+  defp maybe_set_current_pts_to_input_pts(state, _input_pts), do: state
   @impl true
   def handle_buffer(
         :input,
@@ -82,9 +88,8 @@ defmodule Membrane.FLAC.Parser do
         _ctx,
         %{parser: parser} = state
       ) do
-    state = set_current_pts(state, input_pts)
+    state = maybe_set_current_pts_to_input_pts(state, input_pts)
     state = %{state | input_pts: input_pts}
-
     validate_pts_integrity(state)
 
     case Engine.parse(payload, parser) do
@@ -99,7 +104,7 @@ defmodule Membrane.FLAC.Parser do
               {:buffer, {:output, buf}}
           end)
 
-        {actions, state} = calculate_pts(actions, state)
+        {actions, state} = calculate_buffers_pts(actions, state)
 
         {actions, %{state | parser: parser}}
 
@@ -110,10 +115,6 @@ defmodule Membrane.FLAC.Parser do
 
   defp validate_pts_integrity(state)
        when not state.generate_best_effort_timestamps? and
-              state.parser.queue != <<>> and
-              state.meta_queue == [] and
-              state.current_pts != nil and
-              state.input_pts != nil and
               state.frame_duration != nil do
     epsilon = state.frame_duration / 10
 
@@ -134,7 +135,7 @@ defmodule Membrane.FLAC.Parser do
   def handle_end_of_stream(:input, _ctx, state) do
     {:ok, buffer} = Engine.flush(state.parser)
 
-    {buffers_with_pts, state} = calculate_pts({:buffer, {:output, buffer}}, state)
+    {buffers_with_pts, state} = calculate_buffers_pts({:buffer, {:output, buffer}}, state)
 
     actions =
       buffers_with_pts ++
@@ -146,37 +147,20 @@ defmodule Membrane.FLAC.Parser do
     {actions, state}
   end
 
-  defp calculate_pts(actions, state) do
-    # in some cases actions are not a list but a single action tuple
-    actions =
-      if is_list(actions) do
-        actions
-      else
-        [actions]
-      end
+  defp calculate_buffers_pts(actions, state) do
+    actions = Bunch.listify(actions)
 
-    # separate audio buffers from FLAC metadata buffers
-    {meta_buffers, audio_buffers} =
+    # separate misc actions (stream formats and FLAC metadata buffers) from audio buffers
+    {misc_actions, audio_buffers} =
       actions
-      |> Enum.split_with(fn
-        {:stream_format, {:output, %FLAC{}}} ->
-          true
+      |> Enum.split_with(
+        &(not match?({:buffer, {:output, %Buffer{metadata: %Membrane.FLAC.FrameMetadata{}}}}, &1))
+      )
 
-        {:buffer, {:output, %Buffer{} = buffer}} ->
-          case buffer.metadata do
-            %Membrane.FLAC.FrameMetadata{} ->
-              false
-
-            _no_metadata ->
-              true
-          end
-      end)
-
-    # set pts to audio buffers
     {audio_buffers, state} = set_pts_audio_buffers(audio_buffers, state)
 
     # set pts to metadata buffers
-    meta_queue = state.meta_queue ++ meta_buffers
+    meta_queue = state.meta_queue ++ misc_actions
 
     cond do
       audio_buffers != [] and meta_queue != [] ->
