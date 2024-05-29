@@ -151,10 +151,10 @@ defmodule Membrane.FLAC.Parser do
     actions = Bunch.listify(actions)
 
     # separate misc actions (stream formats and FLAC metadata buffers) from audio buffers
-    {misc_actions, audio_buffers} =
+    {audio_buffers, misc_actions} =
       actions
       |> Enum.split_with(
-        &(not match?({:buffer, {:output, %Buffer{metadata: %Membrane.FLAC.FrameMetadata{}}}}, &1))
+        &match?({:buffer, {:output, %Buffer{metadata: %Membrane.FLAC.FrameMetadata{}}}}, &1)
       )
 
     {audio_buffers, state} = set_pts_audio_buffers(audio_buffers, state)
